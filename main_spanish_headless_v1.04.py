@@ -1,7 +1,7 @@
 """
-HEADLESS SPANISH LICENSE PLATE RECOGNITION SYSTEM - v1.03
-IMPROVED: Removed aspect ratio filter, temporal voting, regex validation
-Uses config_v1_03.py for configurable settings.
+HEADLESS SPANISH LICENSE PLATE RECOGNITION SYSTEM - v1.04
+IMPROVED: Removed aspect ratio filter, temporal voting, regex validation, BoT-SORT tracker
+Uses config.py for configurable settings.
 """
 import os
 import cv2
@@ -31,14 +31,14 @@ from config import (
 )
 
 
-class HeadlessSpanishLPR_v1_03:
+class HeadlessSpanishLPR_v1_04:
     """
-    Headless Spanish License Plate Recognition system v1.03
+    Headless Spanish License Plate Recognition system v1.04
     With improved OCR accuracy and per-car deduplication.
     """
     
-    def __init__(self, video_path: str, output_csv: str = "results_spanish_headless_v1.03.csv",
-                 output_text_file: str = "unique_plates_v1.03.txt",
+    def __init__(self, video_path: str, output_csv: str = "results_spanish_headless.csv",
+                 output_text_file: str = "unique_plates.txt",
                  ground_truth_file: str = None, min_confidence: float = 0.40):
         """
         Headless Spanish License Plate Recognition system.
@@ -78,8 +78,15 @@ class HeadlessSpanishLPR_v1_03:
             self.coco_model.to(self.device)
             self.license_plate_detector.to(self.device)
         
-        # Initialize tracker
-        self.mot_tracker = Sort()
+        # Initialize tracker based on config
+        self.tracker_type = TRACKER_TYPE
+        if self.tracker_type == "botsort":
+            # BoT-SORT: Use YOLOv8 built-in tracking (no separate tracker needed)
+            self.mot_tracker = None
+            self.frame_count = 0  # For persist tracking
+        else:
+            # SORT: Use traditional SORT tracker
+            self.mot_tracker = Sort()
         
         # Results and statistics
         self.results = {}
@@ -120,6 +127,7 @@ class HeadlessSpanishLPR_v1_03:
         print(f"   - OCR confidence threshold: {self.ocr_confidence_threshold:.2f}")
         print(f"   - OCR upscale factor: {self.ocr_upscale_factor}x")
         print(f"   - Min plate size: {self.min_plate_size}")
+        print(f"   - Tracker type: {self.tracker_type}")
         print(f"   - Temporal voting: {self.temporal_voting_enabled}")
         print(f"   - OCR correction: {self.ocr_correction_enabled}")
         print(f"   - OCR attempts per plate: {self.ocr_attempts}")
@@ -352,7 +360,7 @@ class HeadlessSpanishLPR_v1_03:
         for processed_img, method_name in methods:
             text, score = read_spanish_license_plate_optimized(processed_img)
             
-            # Check format validity using regex validation (v1.03)
+            # Check format validity using regex validation (v1.04)
             is_valid_spanish = self.is_valid_spanish_format(text)
             
             if text and score >= best_score:
@@ -390,22 +398,86 @@ class HeadlessSpanishLPR_v1_03:
             
         return False
     
+    def _convert_botsort_to_sort_format(self, detections, track_ids):
+        """
+        Convert BoT-SORT format to SORT format for compatibility with get_car function.
+        BoT-SORT returns track_ids separately, SORT returns [x1,y1,x2,y2,score,track_id]
+        """
+        if not detections:
+            return []
+        
+        sort_format = []
+        for i, det in enumerate(detections):
+            if i < len(track_ids):
+                tid = track_ids[i]
+            else:
+                tid = -1
+            # get_car expects: [x1, y1, x2, y2, track_id] - 5 values
+            sort_format.append([det[0], det[1], det[2], det[3], float(tid)])
+        
+        return np.array(sort_format) if sort_format else np.array([])
+    
     def detect_vehicles(self, frame):
-        """Detect vehicles in frame."""
+        """Detect vehicles in frame. Returns detections and track_ids."""
         det_start = time.time()
         
-        results = self.coco_model(frame, imgsz=self.yolo_imgsz, verbose=False, device=self.device)[0]
-        
-        detections = []
-        for detection in results.boxes.data.tolist():
-            x1, y1, x2, y2, score, class_id = detection
+        if self.tracker_type == "botsort":
+            # Use YOLO's track method with BoT-SORT
+            results = self.coco_model.track(
+                frame, 
+                persist=True, 
+                tracker="botsort.yaml", 
+                imgsz=self.yolo_imgsz,
+                verbose=False,
+                device=self.device
+            )[0]
             
-            # Use config threshold
-            if int(class_id) in [2, 3, 5, 7] and score > VEHICLE_CONF_THRESHOLD:
-                detections.append([x1, y1, x2, y2, score])
-        
-        self.detection_times.append(time.time() - det_start)
-        return detections
+            detections = []
+            track_ids = []
+            
+            # Use explicit attributes instead of raw data tensor to avoid unpacking errors
+            if results.boxes is not None and len(results.boxes) > 0:
+                # Safely extract boxes, confidences, and classes
+                boxes = results.boxes.xyxy.cpu().tolist()
+                confs = results.boxes.conf.cpu().tolist()
+                clsses = results.boxes.cls.cpu().tolist()
+                
+                # Check if tracking IDs are available
+                if results.boxes.id is not None:
+                    t_ids = results.boxes.id.cpu().tolist()
+                    for box, conf, cls, t_id in zip(boxes, confs, clsses, t_ids):
+                        x1, y1, x2, y2 = box
+                        if int(cls) in [2, 3, 5, 7] and conf > VEHICLE_CONF_THRESHOLD:
+                            detections.append([x1, y1, x2, y2, conf])
+                            track_ids.append(int(t_id))
+                else:
+                    # Fallback if no tracking IDs (first frame or no detections)
+                    for box, conf, cls in zip(boxes, confs, clsses):
+                        x1, y1, x2, y2 = box
+                        if int(cls) in [2, 3, 5, 7] and conf > VEHICLE_CONF_THRESHOLD:
+                            detections.append([x1, y1, x2, y2, conf])
+                            track_ids.append(-1)  # No track ID available
+            
+            self.detection_times.append(time.time() - det_start)
+            return detections, track_ids
+        else:
+            # Use traditional SORT tracking
+            results = self.coco_model(frame, imgsz=self.yolo_imgsz, verbose=False, device=self.device)[0]
+            
+            detections = []
+            if results.boxes is not None and len(results.boxes) > 0:
+                boxes = results.boxes.xyxy.cpu().tolist()
+                confs = results.boxes.conf.cpu().tolist()
+                clsses = results.boxes.cls.cpu().tolist()
+                
+                for box, conf, cls in zip(boxes, confs, clsses):
+                    x1, y1, x2, y2 = box
+                    # Use config threshold
+                    if int(cls) in [2, 3, 5, 7] and conf > VEHICLE_CONF_THRESHOLD:
+                        detections.append([x1, y1, x2, y2, conf])
+            
+            self.detection_times.append(time.time() - det_start)
+            return detections
     
     def detect_license_plates(self, frame):
         """Detect license plates in frame."""
@@ -414,18 +486,23 @@ class HeadlessSpanishLPR_v1_03:
         results = self.license_plate_detector(frame, imgsz=self.yolo_imgsz, verbose=False, device=self.device)[0]
         
         plates = []
-        for detection in results.boxes.data.tolist():
-            x1, y1, x2, y2, score, class_id = detection
+        if results.boxes is not None and len(results.boxes) > 0:
+            boxes = results.boxes.xyxy.cpu().tolist()
+            confs = results.boxes.conf.cpu().tolist()
+            clsses = results.boxes.cls.cpu().tolist()
             
-            # Apply confidence threshold
-            if score >= self.plate_confidence_threshold:
-                # Check minimum size
-                plate_width = x2 - x1
-                plate_height = y2 - y1
+            for box, conf, cls in zip(boxes, confs, clsses):
+                x1, y1, x2, y2 = box
                 
-                # Size filter (removed aspect ratio constraint in v1.03)
-                if plate_width >= self.min_plate_size[0] and plate_height >= self.min_plate_size[1]:
-                    plates.append([x1, y1, x2, y2, score, class_id])
+                # Apply confidence threshold
+                if conf >= self.plate_confidence_threshold:
+                    # Check minimum size
+                    plate_width = x2 - x1
+                    plate_height = y2 - y1
+                    
+                    # Size filter (removed aspect ratio constraint in v1.04)
+                    if plate_width >= self.min_plate_size[0] and plate_height >= self.min_plate_size[1]:
+                        plates.append([x1, y1, x2, y2, conf, cls])
         
         self.detection_times.append(time.time() - plate_start)
         return plates
@@ -434,14 +511,22 @@ class HeadlessSpanishLPR_v1_03:
         """Process a single frame."""
         frame_start = time.time()
         
-        # Detect vehicles
-        vehicle_detections = self.detect_vehicles(frame)
+        # Detect vehicles (returns detections and track_ids for botsort)
+        vehicle_result = self.detect_vehicles(frame)
         
-        # Track vehicles
-        if vehicle_detections:
-            track_ids = self.mot_tracker.update(np.asarray(vehicle_detections))
+        # Handle both tracker types
+        if self.tracker_type == "botsort":
+            vehicle_detections, track_ids = vehicle_result
+            # Convert to SORT-like format for get_car function
+            # track_ids format: [det1_track_id, det2_track_id, ...]
+            track_ids = self._convert_botsort_to_sort_format(vehicle_detections, track_ids)
         else:
-            track_ids = []
+            vehicle_detections = vehicle_result
+            # Track vehicles with SORT
+            if vehicle_detections:
+                track_ids = self.mot_tracker.update(np.asarray(vehicle_detections))
+            else:
+                track_ids = []
         
         # Detect license plates
         plate_detections = self.detect_license_plates(frame)
@@ -831,7 +916,7 @@ def parse_args():
     Parse command-line arguments.
     """
     parser = argparse.ArgumentParser(
-        description='Headless Spanish License Plate Recognition System v1.03 - IMPROVED'
+        description='Headless Spanish License Plate Recognition System v1.04 - IMPROVED'
     )
     parser.add_argument('--video', '-v',
                         type=str,
@@ -839,11 +924,11 @@ def parse_args():
                         help='Path to input video file')
     parser.add_argument('--output', '-o',
                         type=str,
-                        default='results_spanish_headless_v1.03.csv',
+                        default='results_spanish_headless.csv',
                         help='Output CSV file path')
     parser.add_argument('--plates-file', '-pf',
                         type=str,
-                        default='unique_plates_v1.03.txt',
+                        default='unique_plates.txt',
                         help='Output text file path with car_id, license_nmb, score')
     parser.add_argument('--max-frames', '-m',
                         type=int,
@@ -876,7 +961,7 @@ def main():
     min_confidence = args.min_confidence
     
     print("\n" + "=" * 70)
-    print(f"🚀 HEADLESS SPANISH LPR - v1.03 (IMPROVED)")
+    print(f"🚀 HEADLESS SPANISH LPR - v1.04 (IMPROVED)")
     print("=" * 70)
     print(f"Video: {video_path}")
     if ground_truth_file:
@@ -886,7 +971,7 @@ def main():
     print("=" * 70)
     
     # Create and run system
-    lpr_system = HeadlessSpanishLPR_v1_03(
+    lpr_system = HeadlessSpanishLPR_v1_04(
         video_path=video_path,
         output_csv=output_csv,
         output_text_file=output_text_file,

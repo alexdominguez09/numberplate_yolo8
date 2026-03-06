@@ -1,10 +1,10 @@
 """
-Spanish LPR System v1.03 - Configuration File
-==============================================
+Spanish LPR System v1.04 - Configuration File
+=============================================
 This file contains all adjustable settings for the license plate recognition system.
 Copy this file to config.py or modify this directly to change settings.
 
-Version: 1.03
+Version: 1.04
 """
 
 # =============================================================================
@@ -66,7 +66,7 @@ MIN_PLATE_SIZE = (30, 15)
 # Options: "sort" (default), "botsort"
 # BoT-SORT provides better tracking for occluded vehicles but requires
 # additional configuration files.
-TRACKER_TYPE = "sort"
+TRACKER_TYPE = "botsort"
 
 # =============================================================================
 # PLATE VALIDATION SETTINGS
