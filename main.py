@@ -1,18 +1,43 @@
 from ultralytics import YOLO
 import cv2 as cv
 import numpy as np
+import argparse
 
 from sort.sort import *
 from utils import *
 
+
+def parse_args():
+    """
+    Parse command-line arguments.
+    """
+    parser = argparse.ArgumentParser(
+        description='License Plate Recognition System'
+    )
+    parser.add_argument('--video', '-v',
+                        type=str,
+                        required=True,
+                        help='Path to input video file')
+    parser.add_argument('--output', '-o',
+                        type=str,
+                        default='./test.csv',
+                        help='Output CSV file path')
+    return parser.parse_args()
+
+
 # load models
 model = YOLO('yolov8n.pt')
-plate_detector_model = YOLO('./models/license_plate_detector.pt')
+plate_detector_model = YOLO('./models/yolov8n_license_plate.pt')
 
 mot_tracker = Sort()
 
-# load video
-cap = cv.VideoCapture('/home/alex/Downloads/video_carplates1.mkv')
+
+if __name__ == "__main__":
+    # Parse arguments
+    args = parse_args()
+    
+    # load video
+    cap = cv.VideoCapture(args.video)
 
 vehicle_ids = [2, 3, 5, 7]
 results = {}
@@ -71,4 +96,4 @@ while ret:
         break
 
 # write results
-write_csv(results, './test.csv')
+write_csv(results, args.output)

@@ -40,7 +40,7 @@ class SpanishLicensePlateDetector:
         
         # Load YOLO models
         self.coco_model = YOLO('yolov8n.pt')
-        self.license_plate_detector = YOLO('./models/license_plate_detector.pt')
+        self.license_plate_detector = YOLO('./models/yolov8n_license_plate.pt')
         
         # Move models to GPU if available
         if self.use_gpu:

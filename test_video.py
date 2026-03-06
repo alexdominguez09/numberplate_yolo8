@@ -24,7 +24,7 @@ def main(video_path, output_csv='./test_output.csv'):
     # Load models
     print("Loading YOLO models...")
     model = YOLO('yolov8n.pt')
-    plate_detector_model = YOLO('./models/license_plate_detector.pt')
+    plate_detector_model = YOLO('./models/yolov8n_license_plate.pt')
     
     mot_tracker = Sort()
     vehicle_ids = [2, 3, 5, 7]  # car, motorcycle, bus, truck

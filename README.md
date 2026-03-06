@@ -56,12 +56,21 @@ echo "and place it in the models/ directory"
 ```
 
 ### 3. Usage Examples
-```python
+```bash
 # Production system with visualization
-python main_spanish_production.py
+python main_spanish_production.py --video /path/to/video.mkv
+
+# Production headless (no display)
+python main_spanish_production.py --video video.mkv --no-display
+
+# Production with max frames
+python main_spanish_production.py -v video.mkv -m 300 -o results.csv
 
 # Headless mode (maximum performance)
-python main_spanish_headless.py
+python main_spanish_headless.py --video video.mkv --max-frames 300
+
+# Original UK plate recognition
+python main.py --video demo_1.mp4 --output test.csv
 
 # Test with Spanish plate images
 python test_spanish_images.py
@@ -90,11 +99,28 @@ numberplate_yolo8/
 ```
 
 ## 🔧 Configuration
-Key configuration parameters in `main_spanish_production.py`:
+
+### Command-Line Arguments
+
+**main_spanish_production.py:**
+- `--video, -v`: Path to input video file (required)
+- `--output, -o`: Output CSV file path (default: results_spanish_production.csv)
+- `--max-frames, -m`: Maximum frames to process (default: None for full video)
+- `--no-display`: Run without video display (headless mode)
+
+**main_spanish_headless.py:**
+- `--video, -v`: Path to input video file (required)
+- `--output, -o`: Output CSV file path (default: results_spanish_headless.csv)
+- `--max-frames, -m`: Maximum frames to process (default: None for full video)
+
+**main.py:**
+- `--video, -v`: Path to input video file (required)
+- `--output, -o`: Output CSV file path (default: ./test.csv)
+
+### Key parameters (in code):
 - `plate_confidence_threshold = 0.3`
 - `ocr_confidence_threshold = 0.15`
 - `min_plate_size = (20, 20)`
-- `max_frames = 300` (set to `None` for full video)
 
 ## 📝 Spanish Plate Formats Supported
 - **Current (2000+)**: `####-LLL` (e.g., `1234-ABC`)

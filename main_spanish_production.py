@@ -12,6 +12,7 @@ import time
 from datetime import datetime
 import torch
 import json
+import argparse
 
 # Suppress Qt font warnings
 os.environ['QT_LOGGING_RULES'] = '*.warning=false'
@@ -43,7 +44,7 @@ class ProductionSpanishLPR:
         # Load models with GPU optimization
         print("\n🚀 Loading models with GPU optimization...")
         self.coco_model = YOLO('yolov8n.pt')
-        self.license_plate_detector = YOLO('./models/license_plate_detector.pt')
+        self.license_plate_detector = YOLO('./models/yolov8n_license_plate.pt')
         
         if self.use_gpu:
             self.coco_model.to(self.device)
@@ -584,15 +585,43 @@ class ProductionSpanishLPR:
         
         return report
 
+def parse_args():
+    """
+    Parse command-line arguments.
+    """
+    parser = argparse.ArgumentParser(
+        description='Production Spanish License Plate Recognition System'
+    )
+    parser.add_argument('--video', '-v',
+                        type=str,
+                        required=True,
+                        help='Path to input video file')
+    parser.add_argument('--output', '-o',
+                        type=str,
+                        default='results_spanish_production.csv',
+                        help='Output CSV file path')
+    parser.add_argument('--max-frames', '-m',
+                        type=int,
+                        default=None,
+                        help='Maximum frames to process (None for full video)')
+    parser.add_argument('--no-display',
+                        action='store_true',
+                        help='Run without video display (headless mode)')
+    return parser.parse_args()
+
+
 def main():
     """
     Main function for production Spanish LPR system.
     """
-    # Configuration
-    video_path = "/home/alex/Downloads/video_carplates1.mkv"
-    output_csv = "results_spanish_production.csv"
-    max_frames = None  # Set to None for full video
-    show_video = True  # Set to False for headless operation
+    # Parse arguments
+    args = parse_args()
+    
+    # Configuration from arguments
+    video_path = args.video
+    output_csv = args.output
+    max_frames = args.max_frames
+    show_video = not args.no_display
     
     print("\n" + "="*70)
     print("🚀 PRODUCTION SPANISH LICENSE PLATE RECOGNITION")
