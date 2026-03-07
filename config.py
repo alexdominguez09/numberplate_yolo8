@@ -1,10 +1,10 @@
 """
-Spanish LPR System v1.04 - Configuration File
-=============================================
+Spanish LPR System v1.1 - Configuration File
+============================================
 This file contains all adjustable settings for the license plate recognition system.
 Copy this file to config.py or modify this directly to change settings.
 
-Version: 1.04
+Version: 1.1
 """
 
 # =============================================================================
@@ -21,8 +21,8 @@ YOLO_IMGSZ = 640
 # --------------------------------------
 # Lower values detect more vehicles but may include false positives.
 # Range: 0.0 - 1.0
-# Recommended: 0.5 (default)
-VEHICLE_CONF_THRESHOLD = 0.5
+# Recommended: 0.25 for fine-tuned models that detect both vehicles and plates
+VEHICLE_CONF_THRESHOLD = 0.25
 
 # License Plate Detection Confidence Threshold
 # --------------------------------------------
@@ -42,14 +42,14 @@ PLATE_CONF_THRESHOLD = 0.4
 # 2.0 = 2x upscale
 # 3.0 = 3x upscale (can improve OCR but slower)
 # Recommended: 1.0 (default), 2.0, or 3.0
-OCR_UPSCALE_FACTOR = 2.0
+OCR_UPSCALE_FACTOR = 1.5
 
 # OCR Confidence Threshold
 # ------------------------
 # Minimum confidence required for OCR result to be accepted.
 # Range: 0.0 - 1.0
 # Recommended: 0.40 (default)
-OCR_MIN_CONFIDENCE = 0.40
+OCR_MIN_CONFIDENCE = 0.42
 
 # Minimum Plate Size (width, height) in pixels
 # --------------------------------------------

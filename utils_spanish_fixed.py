@@ -2,7 +2,7 @@
 Fixed Spanish License Plate Recognition Utilities
 With proper character handling for Spanish plates.
 """
-import easyocr
+from paddleocr import PaddleOCR
 import PIL
 import cv2
 import numpy as np
@@ -10,10 +10,21 @@ from typing import Tuple, Optional, List, Dict
 import re
 import torch
 
-PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
+# Lazy initialization - only create reader when needed
+reader = None
 
-# Initialize EasyOCR reader with GPU if available
-reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
+def get_reader():
+    """Lazy initialization of PaddleOCR reader."""
+    global reader
+    if reader is None:
+        reader = PaddleOCR(
+            use_angle_cls=True, 
+            lang='en',
+            use_tensorrt=False,  # Disable TensorRT to avoid compatibility issues
+#            show_log=False  # PaddleOCR does not have this param
+        )
+        print('   ✅ PaddleOCR reader initialized')
+    return reader
 
 # Spanish license plate specific handling
 # Spanish plates have specific formats:
@@ -249,33 +260,127 @@ def format_spanish_plate_nicely(text: str) -> str:
 
 def read_spanish_license_plate_optimized(img: np.ndarray) -> Tuple[str, float]:
     """
-    Optimized Spanish license plate reading.
+    Optimized Spanish license plate reading using PaddleOCR.
+    PaddleOCR expects 3-channel RGB images.
     """
-    # Preprocess for Spanish plates
-    processed_img = preprocess_spanish_plate(img)
+    # Validate input image
+    if img is None or img.size == 0:
+        return "", 0.0
     
-    # Read with EasyOCR
-    detections = reader.readtext(processed_img)
+    # Ensure image is valid
+    if len(img.shape) != 3 or img.shape[2] != 3:
+        # Convert grayscale or single channel to BGR first, then RGB
+        if len(img.shape) == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        elif img.shape[2] == 1:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    
+    # PaddleOCR expects RGB format - convert BGR to RGB
+    processed_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    
+    # Read with PaddleOCR
+    ocr_reader = get_reader()
+    try:
+        result = ocr_reader.ocr(processed_img)
+    except Exception as e:
+        print(f"    [OCR Error] Exception during OCR: {e}")
+        return "", 0.0
     
     best_text = ""
     best_score = 0.0
     
-    for bbox, text, score in detections:
-        # Validate as Spanish plate
-        is_valid, formatted_text, format_type = validate_spanish_plate_flexible(text)
-        
-        if is_valid and score > best_score:
-            best_text = formatted_text
-            best_score = score
+    # Parse PaddleOCR result
+    if result:
+        # PaddleOCR v5 returns: [OCRResult]
+        # OCRResult is dict-like with 'rec_texts' and 'rec_scores'
+        try:
+            if isinstance(result, list) and len(result) > 0:
+                ocr_result = result[0]
+                
+                # Handle OCRResult object (dict-like - use [] not .attr)
+                if 'rec_texts' in ocr_result and 'rec_scores' in ocr_result:
+                    rec_texts = ocr_result['rec_texts']
+                    rec_scores = ocr_result['rec_scores']
+                    
+                    for i, text in enumerate(rec_texts):
+                        if not text:
+                            continue
+                        
+                        score = float(rec_scores[i]) if i < len(rec_scores) else 0.0
+                        
+                        # Validate as Spanish plate
+                        is_valid, formatted_text, format_type = validate_spanish_plate_flexible(text)
+                        
+                        if is_valid and score > best_score:
+                            best_text = formatted_text
+                            best_score = score
+                # Handle old format: list of [bbox, (text, score)]
+                elif isinstance(ocr_result, list):
+                    for det in ocr_result:
+                        if not isinstance(det, (list, tuple)) or len(det) < 2:
+                            continue
+                        
+                        text = ""
+                        score = 0.0
+                        
+                        if isinstance(det[1], tuple):
+                            text = str(det[1][0]) if det[1][0] else ""
+                            score = float(det[1][1]) if det[1][1] else 0.0
+                        elif isinstance(det[1], str):
+                            text = str(det[1])
+                            score = float(det[2]) if len(det) > 2 and det[2] else 0.0
+                        
+                        if not text:
+                            continue
+                        
+                        is_valid, formatted_text, format_type = validate_spanish_plate_flexible(text)
+                        
+                        if is_valid and score > best_score:
+                            best_text = formatted_text
+                            best_score = score
+        except Exception as e:
+            print(f"      [PaddleOCR] Error parsing result: {e}")
+            import traceback
+            traceback.print_exc()
     
-    # If no valid plate found, try with highest confidence
-    if not best_text and detections:
-        bbox, text, score = max(detections, key=lambda x: x[2])
-        cleaned = clean_spanish_text_simple(text)
-        
-        if len(cleaned) >= 4:
-            best_text = format_spanish_plate_nicely(cleaned)
-            best_score = score * 0.5  # Reduce confidence for unvalidated plates
+    # If no valid plate found with validation, try raw text
+    if not best_text and result:
+        try:
+            if isinstance(result, list) and len(result) > 0:
+                ocr_result = result[0]
+                
+                # Try OCRResult format first (dict access)
+                if 'rec_texts' in ocr_result:
+                    for text in ocr_result['rec_texts']:
+                        if text:
+                            cleaned = clean_spanish_text_simple(text)
+                            if len(cleaned) >= 4:
+                                best_text = format_spanish_plate_nicely(cleaned)
+                                best_score = 0.5
+                                break
+                # Try old list format
+                elif isinstance(ocr_result, list):
+                    for det in ocr_result:
+                        if not isinstance(det, (list, tuple)) or len(det) < 2:
+                            continue
+                        
+                        raw_text = ""
+                        raw_score = 0.0
+                        if isinstance(det[1], tuple):
+                            raw_text = str(det[1][0]) if det[1][0] else ""
+                            raw_score = float(det[1][1]) if det[1][1] else 0.0
+                        elif isinstance(det[1], str):
+                            raw_text = str(det[1])
+                            raw_score = 0.5
+                        
+                        if raw_text:
+                            cleaned = clean_spanish_text_simple(raw_text)
+                            if len(cleaned) >= 4:
+                                best_text = format_spanish_plate_nicely(cleaned)
+                                best_score = raw_score * 0.5
+                                break
+        except:
+            pass
     
     if best_text:
         return best_text, best_score
@@ -304,10 +409,24 @@ def get_car(license_plate, vehicle_track_ids):
     """Get car information for a license plate."""
     x1, y1, x2, y2, score, class_id = license_plate
     
+    # Handle numpy array
+    if hasattr(vehicle_track_ids, 'tolist'):
+        vehicle_track_ids = vehicle_track_ids.tolist()
+    
     for vehicle_track_id in vehicle_track_ids:
+        # Handle numpy array elements
+        if hasattr(vehicle_track_id, 'tolist'):
+            vehicle_track_id = vehicle_track_id.tolist()
+        
         x_car1, y_car1, x_car2, y_car2, car_id = vehicle_track_id
         
-        if x1 > x_car1 and y1 > y_car1 and x2 < x_car2 and y2 < y_car2:
+        # Check if plate overlaps with vehicle (more lenient than strict inside)
+        # Plate center should be inside vehicle or at least overlapping significantly
+        plate_center_x = (x1 + x2) / 2
+        plate_center_y = (y1 + y2) / 2
+        
+        # Check if plate center is inside vehicle
+        if x_car1 <= plate_center_x <= x_car2 and y_car1 <= plate_center_y <= y_car2:
             return vehicle_track_id
     
     return -1, -1, -1, -1, -1

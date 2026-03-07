@@ -1,6 +1,6 @@
 """
-HEADLESS SPANISH LICENSE PLATE RECOGNITION SYSTEM - v1.04
-IMPROVED: Removed aspect ratio filter, temporal voting, regex validation, BoT-SORT tracker
+HEADLESS SPANISH LICENSE PLATE RECOGNITION SYSTEM - v1.1
+IMPROVED: Fixed duplicate plate reporting, ground-truth-first matching, Hungarian-style assignment
 Uses config.py for configurable settings.
 """
 import os
@@ -31,15 +31,16 @@ from config import (
 )
 
 
-class HeadlessSpanishLPR_v1_04:
+class HeadlessSpanishLPR_v1_1:
     """
-    Headless Spanish License Plate Recognition system v1.04
-    With improved OCR accuracy and per-car deduplication.
+    Headless Spanish License Plate Recognition system v1.1
+    With fixed duplicate plate reporting and ground-truth-first matching.
     """
     
     def __init__(self, video_path: str, output_csv: str = "results_spanish_headless.csv",
                  output_text_file: str = "unique_plates.txt",
-                 ground_truth_file: str = None, min_confidence: float = 0.40):
+                 ground_truth_file: str = None, min_confidence: float = 0.40,
+                 enable_display: bool = False, enable_display_plate: bool = False):
         """
         Headless Spanish License Plate Recognition system.
         
@@ -49,13 +50,17 @@ class HeadlessSpanishLPR_v1_04:
             output_text_file: Path to output text file with car_id, plate, score
             ground_truth_file: Path to ground truth text file
             min_confidence: Minimum OCR confidence to track (increased from 0.15 to 0.40)
+            enable_display: Enable cv2.imshow display window
+            enable_display_plate: Display cropped license plate before OCR
         """
         self.video_path = video_path
         self.output_csv = output_csv
         self.output_text_file = output_text_file
         self.ground_truth_file = ground_truth_file
         self.min_confidence = min_confidence
-        self.version = "1.03"
+        self.enable_display = enable_display
+        self.enable_display_plate = enable_display_plate
+        self.version = "1.1"
         
         # GPU configuration
         self.use_gpu = torch.cuda.is_available()
@@ -69,14 +74,16 @@ class HeadlessSpanishLPR_v1_04:
             print(f"GPU Device: {torch.cuda.get_device_name(0)}")
             print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
         
-        # Load models with GPU optimization
-        print("\n🚀 Loading models with GPU optimization...")
-        self.coco_model = YOLO('yolov8n.pt')
-        self.license_plate_detector = YOLO('./models/yolov8n_license_plate.pt')
+        # Load single fine-tuned model (detects vehicles + license plates)
+        print("\n🚀 Loading fine-tuned YOLO model...")
+        self.model = YOLO('./models/yolov8n_license_plate.pt')
         
         if self.use_gpu:
-            self.coco_model.to(self.device)
-            self.license_plate_detector.to(self.device)
+            self.model.to(self.device)
+        
+        # Define classes to detect: 2=car, 3=motorcycle, 5=bus, 7=truck, 80=license_plate
+        self.vehicle_classes = [2, 3, 5, 7]
+        self.plate_class = 80
         
         # Initialize tracker based on config
         self.tracker_type = TRACKER_TYPE
@@ -133,6 +140,19 @@ class HeadlessSpanishLPR_v1_04:
         print(f"   - OCR attempts per plate: {self.ocr_attempts}")
         
         print("✅ System initialized successfully!")
+        
+        # Display settings
+        self.font = cv2.FONT_HERSHEY_SIMPLEX
+        self.font_scale = 0.6
+        self.font_thickness = 2
+        self.colors = {
+            'car': (0, 255, 0),           # Green for vehicle
+            'track_id': (255, 0, 0),       # Blue for car ID
+            'plate': (0, 165, 255),        # Orange for plate bbox
+            'plate_text': (0, 255, 255),   # Yellow for plate text
+            'info': (255, 255, 255),      # White for info
+            'success': (0, 255, 0),        # Green for success
+        }
     
     def load_ground_truth(self, filepath: str) -> list:
         """
@@ -157,6 +177,136 @@ class HeadlessSpanishLPR_v1_04:
             print(f"❌ Error loading ground truth file: {e}")
         
         return plates
+    
+    def create_visualization(self, frame, vehicle_detections, plate_detections, tracked_cars, frame_results):
+        """
+        Create visualization with bounding boxes and information.
+        """
+        viz_frame = frame.copy()
+        height, width = viz_frame.shape[:2]
+        
+        # Draw vehicle bounding boxes
+        for vehicle in vehicle_detections:
+            x1, y1, x2, y2, score = vehicle
+            cv2.rectangle(viz_frame, (int(x1), int(y1)), (int(x2), int(y2)), 
+                         self.colors['car'], 2)
+            
+            # Vehicle label
+            label = f"Veh: {score:.2f}"
+            (label_width, label_height), baseline = cv2.getTextSize(
+                label, self.font, self.font_scale, self.font_thickness)
+            
+            # Label background
+            cv2.rectangle(viz_frame, 
+                         (int(x1), int(y1) - label_height - 10),
+                         (int(x1) + label_width + 10, int(y1)),
+                         self.colors['car'], -1)
+            
+            # Label text
+            cv2.putText(viz_frame, label, 
+                       (int(x1) + 5, int(y1) - 5),
+                       self.font, self.font_scale, (0, 0, 0), 
+                       self.font_thickness)
+        
+        # Draw tracked vehicles with IDs
+        for track in tracked_cars:
+            x1, y1, x2, y2, track_id = track
+            cv2.rectangle(viz_frame, (int(x1), int(y1)), (int(x2), int(y2)), 
+                         self.colors['track_id'], 2)
+            
+            # Track ID label
+            label = f"ID: {int(track_id)}"
+            (label_width, label_height), baseline = cv2.getTextSize(
+                label, self.font, self.font_scale, self.font_thickness)
+            
+            # Label background
+            cv2.rectangle(viz_frame,
+                         (int(x1), int(y1) - label_height - 10),
+                         (int(x1) + label_width + 10, int(y1)),
+                         self.colors['track_id'], -1)
+            
+            # Label text
+            cv2.putText(viz_frame, label,
+                       (int(x1) + 5, int(y1) - 5),
+                       self.font, self.font_scale, (0, 0, 0),
+                       self.font_thickness)
+        
+        # Draw license plates and text
+        for plate in plate_detections:
+            x1, y1, x2, y2, score, class_id = plate
+            
+            # Plate bounding box
+            cv2.rectangle(viz_frame, (int(x1), int(y1)), (int(x2), int(y2)), 
+                         self.colors['plate'], 3)
+            
+            # Plate confidence
+            plate_label = f"Plate: {score:.2f}"
+            cv2.putText(viz_frame, plate_label,
+                       (int(x1), int(y1) - 35),
+                       self.font, self.font_scale * 0.8, self.colors['plate'],
+                       self.font_thickness)
+        
+        # Draw detected plate text from frame results
+        for car_id, car_data in frame_results.items():
+            plate_info = car_data['plate']
+            x1, y1, x2, y2 = map(int, plate_info['bbox'])
+            plate_text = plate_info['text']
+            text_score = plate_info['text_score']
+            
+            # Plate text label
+            text_label = f"{plate_text} ({text_score:.2f})"
+            (text_width, text_height), baseline = cv2.getTextSize(
+                text_label, self.font, self.font_scale, self.font_thickness)
+            
+            # Text background
+            text_bg_y1 = max(0, y1 - text_height - 15)
+            cv2.rectangle(viz_frame,
+                         (x1, text_bg_y1),
+                         (x1 + text_width + 10, y1),
+                         self.colors['plate_text'], -1)
+            
+            # Text
+            cv2.putText(viz_frame, text_label,
+                       (x1 + 5, y1 - 5),
+                       self.font, self.font_scale, (0, 0, 0),
+                       self.font_thickness)
+        
+        # Add information overlay
+        info_y = 30
+        info_lines = [
+            f"HEADLESS LPR v{self.version} | GPU: {'ON' if self.use_gpu else 'OFF'}",
+            f"Frame: {self.frame_count} | FPS: {self.current_fps:.1f}" if hasattr(self, 'current_fps') else f"Frame: {self.frame_count}",
+            f"Plates: {self.plates_detected} | Valid Spanish: {self.valid_spanish_plates}",
+            f"Time: {datetime.now().strftime('%H:%M:%S')}",
+        ]
+        
+        for line in info_lines:
+            (text_width, text_height), baseline = cv2.getTextSize(
+                line, self.font, 0.7, 2)
+            
+            # Background for text
+            cv2.rectangle(viz_frame,
+                         (10, info_y - text_height - 5),
+                         (10 + text_width + 10, info_y + 5),
+                         (0, 0, 0), -1)
+            
+            # Text
+            cv2.putText(viz_frame, line, (15, info_y),
+                       self.font, 0.7, self.colors['info'], 2)
+            info_y += 30
+        
+        # Add status bar at bottom
+        status_bar_height = 40
+        cv2.rectangle(viz_frame,
+                     (0, height - status_bar_height),
+                     (width, height),
+                     (0, 0, 0), -1)
+        
+        status_text = "✅ SYSTEM ACTIVE | Press 'Q' to quit | 'P' to pause | 'S' for screenshot"
+        cv2.putText(viz_frame, status_text, (10, height - 15),
+                   self.font, 0.6, self.colors['success'], 2)
+        
+        return viz_frame
     
     def track_plate_read(self, car_id: int, plate_text: str, confidence: float):
         """
@@ -309,12 +459,13 @@ class HeadlessSpanishLPR_v1_04:
         accuracy = matches / total_chars if total_chars > 0 else 0.0
         return accuracy
     
-    def preprocess_plate_improved(self, plate_crop: np.ndarray) -> list:
+    def apply_perspective_transform(self, plate_crop: np.ndarray) -> np.ndarray:
         """
-        Improved preprocessing for Spanish plates.
-        Returns list of (processed_image, method_name)
+        Apply perspective transformation to deskew the license plate.
+        Detects contours and flattens the plate into a rectangle.
         """
-        methods = []
+        if plate_crop is None or plate_crop.size == 0:
+            return plate_crop
         
         # Convert to grayscale
         if len(plate_crop.shape) == 3:
@@ -322,28 +473,145 @@ class HeadlessSpanishLPR_v1_04:
         else:
             gray = plate_crop.copy()
         
-        # Method 1: Original (no preprocessing)
-        methods.append((gray.copy(), 'original'))
+        # Apply Gaussian blur to reduce noise
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         
-        # Method 2: CLAHE + Gaussian blur
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-        blurred = cv2.GaussianBlur(enhanced, (3, 3), 0)
-        methods.append((blurred, 'clahe_blur'))
+        # Apply edge detection
+        edges = cv2.Canny(blurred, 50, 150)
         
-        # Method 3: Adaptive thresholding
-        thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                       cv2.THRESH_BINARY, 11, 2)
-        methods.append((thresh, 'adaptive_thresh'))
+        # Find contours
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Method 4: Otsu thresholding
-        _, otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        methods.append((otsu, 'otsu_thresh'))
+        if not contours:
+            return plate_crop
         
-        # Method 5: Bilateral filter (edge-preserving denoising)
-        bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
-        _, thresh_bilateral = cv2.threshold(bilateral, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        methods.append((thresh_bilateral, 'bilateral_otsu'))
+        # Find the largest contour with 4 corners (likely the plate border)
+        largest_contour = None
+        max_area = 0
+        epsilon_factor = 0.02
+        
+        for contour in contours:
+            # Approximate contour to polygon
+            epsilon = epsilon_factor * cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, epsilon, True)
+            
+            if len(approx) == 4:
+                area = cv2.contourArea(contour)
+                if area > max_area:
+                    max_area = area
+                    largest_contour = approx
+        
+        if largest_contour is None or len(largest_contour) != 4:
+            # Try with larger epsilon if no 4-corner contour found
+            for contour in contours:
+                epsilon = 0.04 * cv2.arcLength(contour, True)
+                approx = cv2.approxPolyDP(contour, epsilon, True)
+                
+                if len(approx) >= 4:
+                    area = cv2.contourArea(contour)
+                    if area > max_area:
+                        max_area = area
+                        largest_contour = approx
+                        break
+        
+        if largest_contour is None or len(largest_contour) < 4:
+            return plate_crop
+        
+        # Get the corners and take only the first 4
+        corners = largest_contour.reshape(-1, 2)[:4]
+        
+        if len(corners) != 4:
+            return plate_crop
+        
+        # Sort corners by sum (top-left has smallest sum, bottom-right has largest)
+        corners = corners[np.argsort(corners.sum(axis=1))]
+        top_left, top_right = corners[:2]
+        bottom_left, bottom_right = corners[2:]
+        
+        # Sort by x to get top-left, top-right
+        top_left, top_right = sorted([top_left, top_right], key=lambda x: x[0])
+        bottom_left, bottom_right = sorted([bottom_left, bottom_right], key=lambda x: x[0])
+        
+        # Calculate widths
+        top_width = np.sqrt((top_right[0] - top_left[0])**2 + (top_right[1] - top_left[1])**2)
+        bottom_width = np.sqrt((bottom_right[0] - bottom_left[0])**2 + (bottom_right[1] - bottom_left[1])**2)
+        left_height = np.sqrt((top_left[0] - bottom_left[0])**2 + (top_left[1] - bottom_left[1])**2)
+        right_height = np.sqrt((top_right[0] - bottom_right[0])**2 + (top_right[1] - bottom_right[1])**2)
+        
+        # Output rectangle dimensions (use maximum of each pair)
+        output_width = int(max(top_width, bottom_width))
+        output_height = int(max(left_height, right_height))
+        
+        # Ensure minimum size
+        output_width = max(output_width, 100)
+        output_height = max(output_height, 30)
+        
+        # Source points (detected corners)
+        src_pts = np.array([top_left, top_right, bottom_right, bottom_left], dtype=np.float32)
+        
+        # Destination points (rectangle)
+        dst_pts = np.array([
+            [0, 0],
+            [output_width - 1, 0],
+            [output_width - 1, output_height - 1],
+            [0, output_height - 1]
+        ], dtype=np.float32)
+        
+        # Get perspective transform matrix
+        transform_matrix = cv2.getPerspectiveTransform(src_pts, dst_pts)
+        
+        # Apply perspective transformation
+        try:
+            warped = cv2.warpPerspective(plate_crop, transform_matrix, (output_width, output_height))
+            return warped
+        except:
+            return plate_crop
+    
+    def preprocess_plate_improved(self, plate_crop: np.ndarray) -> list:
+        """
+        Improved preprocessing for Spanish plates.
+        Returns list of (processed_image, method_name)
+        For PaddleOCR, we need 3-channel images (RGB/BGR).
+        """
+        methods = []
+        
+        # Ensure we have a 3-channel image for PaddleOCR
+        if len(plate_crop.shape) == 2:
+            # Grayscale -> BGR
+            plate_crop = cv2.cvtColor(plate_crop, cv2.COLOR_GRAY2BGR)
+        elif plate_crop.shape[2] == 1:
+            # Single channel -> BGR
+            plate_crop = cv2.cvtColor(plate_crop, cv2.COLOR_GRAY2BGR)
+        
+        # Method 1: Original color
+        methods.append((plate_crop.copy(), 'original_color'))
+        
+        # Method 2: Convert to grayscale and back to color (simulates some preprocessing)
+        gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
+        color_from_gray = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        methods.append((color_from_gray, 'gray_to_color'))
+        
+        # Method 3: Brightness/contrast adjustment
+        alpha = 1.5  # Contrast control
+        beta = 20    # Brightness control
+        adjusted = cv2.convertScaleAbs(plate_crop, alpha=alpha, beta=beta)
+        methods.append((adjusted, 'contrast_brightness'))
+        
+        # Method 4: Sharpen
+        kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+        sharpened = cv2.filter2D(plate_crop, -1, kernel)
+        methods.append((sharpened, 'sharpened'))
+        
+        # Method 5: Histogram equalization (color)
+        # Convert to YUV, equalize Y, convert back
+        yuv = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2YUV)
+        yuv[:,:,0] = cv2.equalizeHist(yuv[:,:,0])
+        hist_eq = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
+        methods.append((hist_eq, 'hist_eq_color'))
+        
+        # Method 6: Denoised
+        denoised = cv2.fastNlMeansDenoisingColored(plate_crop, None, 10, 10, 7, 21)
+        methods.append((denoised, 'denoised_color'))
         
         return methods
     
@@ -360,7 +628,7 @@ class HeadlessSpanishLPR_v1_04:
         for processed_img, method_name in methods:
             text, score = read_spanish_license_plate_optimized(processed_img)
             
-            # Check format validity using regex validation (v1.04)
+            # Check format validity using regex validation
             is_valid_spanish = self.is_valid_spanish_format(text)
             
             if text and score >= best_score:
@@ -418,12 +686,12 @@ class HeadlessSpanishLPR_v1_04:
         return np.array(sort_format) if sort_format else np.array([])
     
     def detect_vehicles(self, frame):
-        """Detect vehicles in frame. Returns detections and track_ids."""
+        """Detect vehicles in frame using fine-tuned model. Returns detections and track_ids."""
         det_start = time.time()
         
         if self.tracker_type == "botsort":
             # Use YOLO's track method with BoT-SORT
-            results = self.coco_model.track(
+            results = self.model.track(
                 frame, 
                 persist=True, 
                 tracker="botsort.yaml", 
@@ -447,14 +715,14 @@ class HeadlessSpanishLPR_v1_04:
                     t_ids = results.boxes.id.cpu().tolist()
                     for box, conf, cls, t_id in zip(boxes, confs, clsses, t_ids):
                         x1, y1, x2, y2 = box
-                        if int(cls) in [2, 3, 5, 7] and conf > VEHICLE_CONF_THRESHOLD:
+                        if int(cls) in self.vehicle_classes and conf > VEHICLE_CONF_THRESHOLD:
                             detections.append([x1, y1, x2, y2, conf])
                             track_ids.append(int(t_id))
                 else:
                     # Fallback if no tracking IDs (first frame or no detections)
                     for box, conf, cls in zip(boxes, confs, clsses):
                         x1, y1, x2, y2 = box
-                        if int(cls) in [2, 3, 5, 7] and conf > VEHICLE_CONF_THRESHOLD:
+                        if int(cls) in self.vehicle_classes and conf > VEHICLE_CONF_THRESHOLD:
                             detections.append([x1, y1, x2, y2, conf])
                             track_ids.append(-1)  # No track ID available
             
@@ -462,7 +730,7 @@ class HeadlessSpanishLPR_v1_04:
             return detections, track_ids
         else:
             # Use traditional SORT tracking
-            results = self.coco_model(frame, imgsz=self.yolo_imgsz, verbose=False, device=self.device)[0]
+            results = self.model(frame, imgsz=self.yolo_imgsz, verbose=False, device=self.device)[0]
             
             detections = []
             if results.boxes is not None and len(results.boxes) > 0:
@@ -473,39 +741,58 @@ class HeadlessSpanishLPR_v1_04:
                 for box, conf, cls in zip(boxes, confs, clsses):
                     x1, y1, x2, y2 = box
                     # Use config threshold
-                    if int(cls) in [2, 3, 5, 7] and conf > VEHICLE_CONF_THRESHOLD:
+                    if int(cls) in self.vehicle_classes and conf > VEHICLE_CONF_THRESHOLD:
                         detections.append([x1, y1, x2, y2, conf])
             
             self.detection_times.append(time.time() - det_start)
             return detections
     
     def detect_license_plates(self, frame):
-        """Detect license plates in frame."""
+        """Detect license plates in frame using fine-tuned model with tracking."""
         plate_start = time.time()
         
-        results = self.license_plate_detector(frame, imgsz=self.yolo_imgsz, verbose=False, device=self.device)[0]
+        # Use track() to get tracking IDs for plates
+        results = self.model.track(
+            frame, 
+            persist=True, 
+            tracker="botsort.yaml",
+            imgsz=self.yolo_imgsz, 
+            verbose=False, 
+            device=self.device
+        )[0]
         
         plates = []
+        plate_track_ids = []
+        
         if results.boxes is not None and len(results.boxes) > 0:
             boxes = results.boxes.xyxy.cpu().tolist()
             confs = results.boxes.conf.cpu().tolist()
             clsses = results.boxes.cls.cpu().tolist()
             
-            for box, conf, cls in zip(boxes, confs, clsses):
+            # Get track IDs if available
+            if results.boxes.id is not None:
+                track_ids = results.boxes.id.cpu().tolist()
+            else:
+                track_ids = [-1] * len(boxes)
+            
+            for box, conf, cls, track_id in zip(boxes, confs, clsses, track_ids):
                 x1, y1, x2, y2 = box
+                cls_int = int(cls)
+                conf_val = float(conf)
                 
-                # Apply confidence threshold
-                if conf >= self.plate_confidence_threshold:
+                # Filter for license plate class (80) and apply confidence threshold
+                if cls_int == self.plate_class and conf_val >= self.plate_confidence_threshold:
                     # Check minimum size
                     plate_width = x2 - x1
                     plate_height = y2 - y1
                     
-                    # Size filter (removed aspect ratio constraint in v1.04)
+                    # Size filter
                     if plate_width >= self.min_plate_size[0] and plate_height >= self.min_plate_size[1]:
                         plates.append([x1, y1, x2, y2, conf, cls])
+                        plate_track_ids.append(int(track_id) if track_id is not None else -1)
         
         self.detection_times.append(time.time() - plate_start)
-        return plates
+        return plates, plate_track_ids
     
     def process_frame(self, frame):
         """Process a single frame."""
@@ -528,69 +815,96 @@ class HeadlessSpanishLPR_v1_04:
             else:
                 track_ids = []
         
-        # Detect license plates
-        plate_detections = self.detect_license_plates(frame)
+        # Detect license plates (now returns both detections and track IDs)
+        plate_detections, plate_track_ids = self.detect_license_plates(frame)
         
         frame_results = {}
         
-        # Process each detected plate
-        for plate in plate_detections:
+        # Process each detected plate directly using plate's own track ID for temporal voting
+        for i, plate in enumerate(plate_detections):
             x1, y1, x2, y2, score, class_id = plate
             
-            # Assign plate to vehicle
-            xcar1, ycar1, xcar2, ycar2, car_id = get_car(plate, track_ids)
+            # Use the plate's own track ID from YOLO tracking
+            # This allows proper temporal voting across frames
+            if i < len(plate_track_ids) and plate_track_ids[i] != -1:
+                car_id = plate_track_ids[i]
+            else:
+                # Fallback: use position-based ID if no track ID available
+                car_id = int(self.frame_count * 1000 + x1)
             
-            if car_id != -1:
-                # Crop license plate with padding
-                pad = 5
-                y1_pad = max(0, int(y1) - pad)
-                y2_pad = min(frame.shape[0], int(y2) + pad)
-                x1_pad = max(0, int(x1) - pad)
-                x2_pad = min(frame.shape[1], int(x2) + pad)
+            # Crop license plate with padding
+            pad = 5
+            y1_pad = max(0, int(y1) - pad)
+            y2_pad = min(frame.shape[0], int(y2) + pad)
+            x1_pad = max(0, int(x1) - pad)
+            x2_pad = min(frame.shape[1], int(x2) + pad)
+            
+            plate_crop = frame[y1_pad:y2_pad, x1_pad:x2_pad, :]
+            
+            if plate_crop.size == 0 or plate_crop.shape[0] < 20 or plate_crop.shape[1] < 60:
+                continue
+            
+            # Apply upscale factor from config if > 1
+            if self.ocr_upscale_factor > 1.0:
+                plate_crop = cv2.resize(plate_crop, None, 
+                                        fx=self.ocr_upscale_factor, 
+                                        fy=self.ocr_upscale_factor, 
+                                        interpolation=cv2.INTER_CUBIC)
+            
+            # Display cropped plate if enabled (before OCR)
+            if self.enable_display_plate:
+                # Create window once
+                if not hasattr(self, '_plate_window_created'):
+                    cv2.namedWindow('License Plate Crop', cv2.WINDOW_NORMAL)
+                    cv2.resizeWindow('License Plate Crop', 600, 200)
+                    self._plate_window_created = True
                 
-                plate_crop = frame[y1_pad:y2_pad, x1_pad:x2_pad, :]
+                # Update window title with frame number
+                cv2.setWindowTitle('License Plate Crop', f'License Plate Crop - Frame {self.frame_count}')
                 
-                if plate_crop.size == 0 or plate_crop.shape[0] < 20 or plate_crop.shape[1] < 60:
-                    continue
+                cv2.imshow('License Plate Crop', plate_crop)
+                cv2.waitKey(1)
+            
+            # Read Spanish license plate with multiple preprocessing methods (ALWAYS run this)
+            plate_text, plate_score, ocr_method = self.read_license_plate_multi(plate_crop)
+            
+            # Only track if confidence is above threshold
+            if plate_text and plate_score >= self.ocr_confidence_threshold:
+                is_valid = self.is_valid_spanish_format(plate_text)
                 
-                # Apply upscale factor from config if > 1
-                if self.ocr_upscale_factor > 1.0:
-                    plate_crop = cv2.resize(plate_crop, None, 
-                                            fx=self.ocr_upscale_factor, 
-                                            fy=self.ocr_upscale_factor, 
-                                            interpolation=cv2.INTER_CUBIC)
-                
-                # Read Spanish license plate with multiple preprocessing methods
-                plate_text, plate_score, ocr_method = self.read_license_plate_multi(plate_crop)
-                
-                # Only track if confidence is above threshold
-                if plate_text and plate_score >= self.ocr_confidence_threshold:
-                    # IMPROVED: Check Spanish format before accepting
-                    if self.is_valid_spanish_format(plate_text):
-                        self.plates_detected += 1
-                        self.valid_spanish_plates += 1
-                        
-                        # Track plate read for temporal voting
-                        self.track_plate_read(car_id, plate_text, plate_score)
-                        
-                        # Store frame results
-                        frame_results[car_id] = {
-                            'car': {'bbox': [xcar1, ycar1, xcar2, ycar2]},
-                            'plate': {
-                                'bbox': [x1, y1, x2, y2],
-                                'bbox_score': score,
-                                'text': plate_text,
-                                'text_score': plate_score,
-                                'ocr_method': ocr_method
-                            }
+                # IMPROVED: Check Spanish format before accepting
+                if is_valid:
+                    self.plates_detected += 1
+                    self.valid_spanish_plates += 1
+                    
+                    # Track plate read for temporal voting
+                    self.track_plate_read(car_id, plate_text, plate_score)
+                    
+                    # Store frame results (use plate bbox as car bbox since no car matching)
+                    frame_results[car_id] = {
+                        'car': {'bbox': [x1, y1, x2, y2]},
+                        'plate': {
+                            'bbox': [x1, y1, x2, y2],
+                            'bbox_score': score,
+                            'text': plate_text,
+                            'text_score': plate_score,
+                            'ocr_method': ocr_method
                         }
+                    }
         
         # Store frame results
         if frame_results:
             self.results[self.frame_count] = frame_results
         
         self.frame_times.append(time.time() - frame_start)
-        return frame_results
+        
+        # Return all data needed for visualization
+        return {
+            'frame_results': frame_results,
+            'vehicle_detections': vehicle_detections,
+            'track_ids': track_ids,
+            'plate_detections': plate_detections
+        }
     
     def process_video(self, max_frames: int = None):
         """
@@ -623,36 +937,86 @@ class HeadlessSpanishLPR_v1_04:
         self.frame_count = 0
         start_time = time.time()
         
+        # Create display window if enabled
+        if self.enable_display:
+            cv2.namedWindow('Spanish LPR - Headless System', cv2.WINDOW_NORMAL)
+            cv2.resizeWindow('Spanish LPR - Headless System', 1280, 720)
+        
         print("\n🎬 Starting headless processing...")
+        if self.enable_display:
+            print("   Controls: Q=Quit, P=Pause, S=Screenshot")
         print("   " + "-"*50)
         
+        paused = False
+        frame = None  # Initialize for screenshot functionality
+        
         while True:
-            # Read frame
-            ret, frame = cap.read()
-            if not ret or (max_frames and self.frame_count >= max_frames):
-                break
-            
-            # Process frame
-            self.process_frame(frame)
-            
-            self.frame_count += 1
-            
-            # Print progress every 50 frames
-            if self.frame_count % 50 == 0:
-                elapsed = time.time() - start_time
-                current_fps = self.frame_count / elapsed if elapsed > 0 else 0
-                progress = self.frame_count / total_frames * 100
+            if not paused:
+                # Read frame
+                ret, frame = cap.read()
+                if not ret or (max_frames and self.frame_count >= max_frames):
+                    break
                 
-                unique_cars = len(self.car_plate_reads)
+                # Process frame and get detection data
+                frame_data = self.process_frame(frame)
                 
-                print(f"   📈 Frame {self.frame_count}/{total_frames} ({progress:.1f}%) | "
-                      f"FPS: {current_fps:.1f} | "
-                      f"Plates: {self.plates_detected} | "
-                      f"Unique Cars: {unique_cars} | "
-                      f"Valid: {self.valid_spanish_plates}")
+                # Increment frame counter
+                self.frame_count += 1
+                
+                # Display frame if enabled
+                if self.enable_display and frame_data:
+                    # Use the create_visualization method
+                    viz_frame = self.create_visualization(
+                        frame=frame,
+                        vehicle_detections=frame_data['vehicle_detections'],
+                        plate_detections=frame_data['plate_detections'],
+                        tracked_cars=frame_data['track_ids'],
+                        frame_results=frame_data['frame_results']
+                    )
+                    
+                    # Calculate current FPS
+                    elapsed = time.time() - start_time
+                    self.current_fps = self.frame_count / elapsed if elapsed > 0 else 0
+                    
+                    # Calculate current FPS
+                    elapsed = time.time() - start_time
+                    self.current_fps = self.frame_count / elapsed if elapsed > 0 else 0
+                    
+                    cv2.imshow('Spanish LPR - Headless System', viz_frame)
+                
+                # Print progress every 50 frames
+                if self.frame_count % 50 == 0:
+                    elapsed = time.time() - start_time
+                    current_fps = self.frame_count / elapsed if elapsed > 0 else 0
+                    progress = self.frame_count / total_frames * 100
+                    
+                    unique_cars = len(self.car_plate_reads)
+                    
+                    print(f"   📈 Frame {self.frame_count}/{total_frames} ({progress:.1f}%) | "
+                          f"FPS: {current_fps:.1f} | "
+                          f"Plates: {self.plates_detected} | "
+                          f"Unique Cars: {unique_cars} | "
+                          f"Valid: {self.valid_spanish_plates}")
+            
+            # Handle keyboard input if display enabled
+            if self.enable_display:
+                key = cv2.waitKey(1 if not paused else 0) & 0xFF
+                
+                if key == ord('q'):  # Quit
+                    print("\n🛑 Quitting...")
+                    break
+                elif key == ord('p'):  # Pause/Resume
+                    paused = not paused
+                    print(f"   {'⏸️ Paused' if paused else '▶️ Resumed'}")
+                elif key == ord('s'):  # Screenshot
+                    screenshot_path = f"screenshot_{self.frame_count}.jpg"
+                    cv2.imwrite(screenshot_path, frame)
+                    print(f"   📸 Screenshot saved: {screenshot_path}")
         
         # Clean up
         cap.release()
+        if self.enable_display:
+            cv2.destroyAllWindows()
         
         # Calculate final statistics
         elapsed_time = time.time() - start_time
@@ -751,7 +1115,7 @@ class HeadlessSpanishLPR_v1_04:
         
         if self.plates_detected > 0:
             print(f"   Plates per frame: {self.plates_detected/self.frame_count:.3f}")
-            print(f"   Spanish plate accuracy: {self.valid_spanish_plates/self.plates_detected*100:.1f}%")
+            print(f"   Spanish format validation rate: {self.valid_spanish_plates/self.plates_detected*100:.1f}%")
         
         # Performance metrics
         if self.frame_times:
@@ -798,7 +1162,7 @@ class HeadlessSpanishLPR_v1_04:
             'output_file': self.output_csv,
             'processing_time_seconds': self.frame_count/avg_fps if avg_fps > 0 else 0,
             'plates_per_frame': self.plates_detected/self.frame_count if self.frame_count > 0 else 0,
-            'spanish_plate_accuracy': self.valid_spanish_plates/self.plates_detected if self.plates_detected > 0 else 0,
+            'spanish_format_validation_rate': self.valid_spanish_plates/self.plates_detected if self.plates_detected > 0 else 0,
             'version': self.version
         }
         
@@ -812,20 +1176,20 @@ class HeadlessSpanishLPR_v1_04:
     
     def write_unique_plates_file(self):
         """
-        Write unique plates to text file with detailed ground truth comparison.
+        Write unique plates to text file with ground truth comparison.
         Format: Ground truth | car_id | license_nmb | license_nmb_score | Accuracy
+        FIXED: Now outputs exactly one entry per ground truth plate (max 30 entries)
+        IMPROVED: Uses Hungarian algorithm style matching to prevent duplicate assignments
         """
         print(f"\n💾 Writing unique plates to: {self.output_text_file}")
         
-        # Get all voted plates
-        voted_plates = {}  # ocr_plate -> {car_id, confidence}
+        # Get all voted plates with their car_id and confidence
+        voted_plates_data = []  # List of (car_id, voted_plate, confidence)
         for car_id in self.car_plate_reads:
             voted_plate = self.get_voted_plate(car_id)
             if voted_plate:
-                voted_plates[voted_plate] = {
-                    'car_id': car_id,
-                    'confidence': self.car_plate_reads[car_id]['max_confidence']
-                }
+                confidence = self.car_plate_reads[car_id]['max_confidence']
+                voted_plates_data.append((car_id, voted_plate, confidence))
         
         # Normalize ground truth for comparison (remove spaces/hyphens)
         gt_normalized = {}
@@ -833,82 +1197,90 @@ class HeadlessSpanishLPR_v1_04:
             gt_clean = re.sub(r'[^A-Z0-9]', '', gt.upper())
             gt_normalized[gt_clean] = gt
         
-        # Track which ground truth plates have been matched
-        matched_gt = set()
+        # Create a list of all possible matches with their scores
+        match_candidates = []  # (gt_clean, car_id, voted_plate, confidence, accuracy)
+        
+        for gt_clean, gt_original in gt_normalized.items():
+            for car_id, voted_plate, confidence in voted_plates_data:
+                ocr_clean = re.sub(r'[^A-Z0-9]', '', voted_plate.upper())
+                
+                # Calculate character-level accuracy
+                matches = 0
+                min_len = min(len(ocr_clean), len(gt_clean))
+                for i in range(min_len):
+                    if ocr_clean[i] == gt_clean[i]:
+                        matches += 1
+                accuracy = matches / max(len(ocr_clean), len(gt_clean)) if max(len(ocr_clean), len(gt_clean)) > 0 else 0
+                
+                # Only consider matches with reasonable accuracy (> 0.5 or exact match for short plates)
+                if accuracy > 0.5 or (len(gt_clean) <= 4 and accuracy > 0.25):
+                    match_candidates.append((gt_clean, car_id, voted_plate, confidence, accuracy, gt_original))
+        
+        # Sort matches by accuracy (descending), then confidence (descending)
+        match_candidates.sort(key=lambda x: (x[4], x[3]), reverse=True)
+        
+        # Greedy assignment: assign each ground truth to the best available OCR result
+        matched_results = {}  # gt_clean -> (car_id, voted_plate, confidence, accuracy)
+        used_car_ids = set()
+        used_ocr_texts = set()
+        
+        for gt_clean, car_id, voted_plate, confidence, accuracy, gt_original in match_candidates:
+            # Skip if this ground truth already matched
+            if gt_clean in matched_results:
+                continue
+            
+            # Skip if this OCR result already used (prevent duplicates)
+            ocr_clean = re.sub(r'[^A-Z0-9]', '', voted_plate.upper())
+            if ocr_clean in used_ocr_texts:
+                continue
+            
+            # Assign this match
+            matched_results[gt_clean] = (car_id, voted_plate, confidence, accuracy)
+            used_car_ids.add(car_id)
+            used_ocr_texts.add(ocr_clean)
         
         with open(self.output_text_file, 'w') as f:
             f.write("Ground truth\tcar_id\tlicense_nmb\tlicense_nmb_score\tAccuracy\n")
             
-            # First, write all detected plates with their best ground truth match
             total_correct_digits = 0
             total_digits_compared = 0
             exact_matches = 0
             detected_count = 0
             
-            # Sort voted plates by car_id for consistent output
-            for voted_plate in sorted(voted_plates.keys(), key=lambda x: voted_plates[x]['car_id']):
-                data = voted_plates[voted_plate]
-                car_id = data['car_id']
-                confidence = data['confidence']
-                
-                # Find best matching ground truth
-                ocr_clean = re.sub(r'[^A-Z0-9]', '', voted_plate.upper())
-                
-                best_match = None
-                best_accuracy = 0
-                
-                for gt_clean, gt_original in gt_normalized.items():
-                    # Calculate character-level accuracy
-                    matches = 0
-                    min_len = min(len(ocr_clean), len(gt_clean))
-                    for i in range(min_len):
-                        if ocr_clean[i] == gt_clean[i]:
-                            matches += 1
-                    accuracy = matches / max(len(ocr_clean), len(gt_clean)) if max(len(ocr_clean), len(gt_clean)) > 0 else 0
-                    
-                    if accuracy > best_accuracy:
-                        best_accuracy = accuracy
-                        best_match = gt_original
-                        
-                    # Check for exact match
-                    if ocr_clean == gt_clean:
-                        best_accuracy = 1.0
-                        best_match = gt_original
-                        exact_matches += 1
-                        matched_gt.add(gt_clean)
-                        break
-                
-                if best_accuracy < 1.0 and best_match:
-                    matched_gt.add(re.sub(r'[^A-Z0-9]', '', best_match.upper()))
-                
-                detected_count += 1
-                total_correct_digits += int(best_accuracy * 7)  # Assume 7 chars for simplicity
-                total_digits_compared += 7
-                
-                if best_accuracy == 1.0:
-                    accuracy_str = "100%"
-                else:
-                    correct_digits = int(best_accuracy * 7)
-                    accuracy_str = f"{int(best_accuracy*100)}% ({correct_digits}/7)"
-                
-                f.write(f"{best_match}\t{car_id:.0f}\t{voted_plate}\t{confidence:.5f}\t{accuracy_str}\n")
-            
-            # Write unmatched ground truth plates
+            # Write results sorted by ground truth plate
             for gt_clean, gt_original in sorted(gt_normalized.items()):
-                if gt_clean not in matched_gt:
-                    f.write(f"{gt_original}\tNA\t\t\t0%\n")
+                if gt_clean in matched_results:
+                    car_id, voted_plate, confidence, accuracy = matched_results[gt_clean]
+                    detected_count += 1
+                    
+                    # Calculate digit accuracy (7 characters for Spanish plates)
+                    correct_digits = int(accuracy * 7)
+                    total_correct_digits += correct_digits
+                    total_digits_compared += 7
+                    
+                    if accuracy == 1.0:
+                        exact_matches += 1
+                        accuracy_str = "100%"
+                    else:
+                        accuracy_str = f"{int(accuracy*100)}% ({correct_digits}/7)"
+                    
+                    f.write(f"{gt_original}\t{car_id:.0f}\t{voted_plate}\t{confidence:.5f}\t\t{accuracy_str}\n")
+                else:
+                    # No match found for this ground truth plate
+                    f.write(f"{gt_original}\t\tNA\t\t\t\t0%\n")
             
             # Write accuracy summary
             f.write(f"\nAccuracy Summary:\n")
             f.write(f"Total detected: {detected_count} out of {len(gt_normalized)}\n")
             f.write(f"Exact matches: {exact_matches}\n")
-            if detected_count > 0:
-                f.write(f"Detection rate: {detected_count}/{len(gt_normalized)} = {detected_count*100/len(gt_normalized):.1f}%\n")
+            if len(gt_normalized) > 0:
+                detection_rate = detected_count / len(gt_normalized) * 100
+                f.write(f"Detection rate: {detected_count}/{len(gt_normalized)} = {detection_rate:.1f}%\n")
             if total_digits_compared > 0:
-                digit_accuracy = total_correct_digits * 100 / total_digits_compared
+                digit_accuracy = total_correct_digits / total_digits_compared * 100
                 f.write(f"Digit accuracy: {total_correct_digits}/{total_digits_compared} = {digit_accuracy:.1f}%\n")
         
-        print(f"   Wrote {len(self.car_plate_reads)} unique plates with ground truth comparison")
+        print(f"   Wrote {len(matched_results)} unique plates (one per ground truth plate)")
 
 
 def parse_args():
@@ -916,7 +1288,7 @@ def parse_args():
     Parse command-line arguments.
     """
     parser = argparse.ArgumentParser(
-        description='Headless Spanish License Plate Recognition System v1.04 - IMPROVED'
+        description='Headless Spanish License Plate Recognition System v1.1 - FIXED DUPLICATE REPORTING'
     )
     parser.add_argument('--video', '-v',
                         type=str,
@@ -942,12 +1314,18 @@ def parse_args():
                         type=float,
                         default=0.40,
                         help='Minimum OCR confidence to track (default: 0.40)')
+    parser.add_argument('--display', '-d',
+                        action='store_true',
+                        help='Enable display window with cv2.imshow')
+    parser.add_argument('--display-plate', '-dp',
+                        action='store_true',
+                        help='Display cropped license plate before OCR')
     return parser.parse_args()
 
 
 def main():
     """
-    Main function for headless Spanish LPR system v1.02.
+    Main function for headless Spanish LPR system v1.1.
     """
     # Parse arguments
     args = parse_args()
@@ -959,24 +1337,30 @@ def main():
     max_frames = args.max_frames
     ground_truth_file = args.ground_truth
     min_confidence = args.min_confidence
+    enable_display = args.display
+    enable_display_plate = args.display_plate
     
     print("\n" + "=" * 70)
-    print(f"🚀 HEADLESS SPANISH LPR - v1.04 (IMPROVED)")
+    print(f"🚀 HEADLESS SPANISH LPR - v1.1 (FIXED DUPLICATE REPORTING)")
     print("=" * 70)
     print(f"Video: {video_path}")
     if ground_truth_file:
         print(f"Ground Truth: {ground_truth_file}")
     print(f"Min Confidence: {min_confidence}")
+    print(f"Display: {'Enabled' if enable_display else 'Disabled'}")
+    print(f"Display Plate: {'Enabled' if enable_display_plate else 'Disabled'}")
     print(f"Plates File: {output_text_file}")
     print("=" * 70)
     
     # Create and run system
-    lpr_system = HeadlessSpanishLPR_v1_04(
+    lpr_system = HeadlessSpanishLPR_v1_1(
         video_path=video_path,
         output_csv=output_csv,
         output_text_file=output_text_file,
         ground_truth_file=ground_truth_file,
-        min_confidence=min_confidence
+        min_confidence=min_confidence,
+        enable_display=enable_display,
+        enable_display_plate=enable_display_plate
     )
     
     # Process video
@@ -994,7 +1378,7 @@ def main():
     
     # Summary
     print(f"\n📈 SUMMARY:")
-    print(f"   • Version: v{report.get('version', '1.02')}")
+    print(f"   • Version: v{report.get('version', '1.1')}")
     print(f"   • Frames processed: {report['frames_processed']}")
     print(f"   • Plates detected: {report['plates_detected']}")
     print(f"   • Unique cars: {report['unique_cars_detected']}")
