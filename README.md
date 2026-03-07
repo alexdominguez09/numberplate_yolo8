@@ -15,7 +15,7 @@
 - **✅ Bot-SORT Tracking**: Multi-object tracking for vehicle continuity
 - **✅ PaddleOCR Integration**: Improved OCR accuracy with Spanish-specific optimizations
 
-## 📊 Performance Metrics v1.1 (NVIDIA GeForce RTX 3080 Ti)
+## 📊 Performance Metrics v1.1 (NVIDIA GeForce GTX 940M 2Gb)
 
 | Metric | Value |
 |--------|-------|
@@ -87,7 +87,6 @@ python test_yolo_models.py
 ```
 numberplate_yolo8/
 ├── main_spanish_headless_v1.1.py    # Main system v1.1 with duplicate fix
-├── config.py                         # Configuration settings v1.1
 ├── utils_spanish_fixed.py           # OCR utilities with PaddleOCR integration
 ├── generate_report.py               # PDF report generator v1.1
 ├── test_yolo_models.py              # YOLO model testing utility
@@ -111,31 +110,7 @@ numberplate_yolo8/
 - `--display, -d`: Enable display window with cv2.imshow
 - `--display-plate, -dp`: Display cropped license plate before OCR
 
-### Configuration File (config.py)
-- `YOLO_IMGSZ = 640`: YOLO inference resolution
-- `VEHICLE_CONF_THRESHOLD = 0.25`: Vehicle detection confidence threshold
-- `PLATE_CONF_THRESHOLD = 0.40`: License plate detection confidence threshold
-- `OCR_UPSCALE_FACTOR = 1.5`: OCR image upscale factor
-- `OCR_MIN_CONFIDENCE = 0.40`: Minimum OCR confidence threshold
-- `MIN_PLATE_SIZE = (30, 15)`: Minimum plate size (width, height)
-- `TRACKER_TYPE = "botsort"`: Tracker type (botsort)
-- `TEMPORAL_VOTING_ENABLED = True`: Enable temporal voting
-- `OCR_CORRECTION_ENABLED = True`: Enable OCR character order correction
 
-## 🐛 v1.1 Duplicate Plate Fix
-
-**Problem:** Previous versions showed 60+ entries in `unique_plates.txt` when there should only be 30 (one per ground truth plate).
-
-**Solution in v1.1:**
-1. **Ground-Truth-First Matching**: Iterate through ground truth plates instead of car_id entries
-2. **Hungarian-Style Assignment**: Each OCR result assigned to only one ground truth plate
-3. **Greedy Matching Algorithm**: Prevents duplicate assignments with accuracy-based prioritization
-4. **Proper Deduplication**: Outputs exactly 30 entries (28 detected + 2 NA for undetected plates)
-
-**Results:**
-- ✅ **28/30 plates detected** with 100% accuracy
-- ✅ **0 duplicate entries** in the report
-- ✅ **93.3% detection rate** with 100% digit accuracy for detected plates
 
 ## 📝 Spanish Plate Formats Supported
 - **Current (2000+)**: `####-LLL` (e.g., `1234-ABC`)
